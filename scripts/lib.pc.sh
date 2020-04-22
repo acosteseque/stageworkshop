@@ -476,18 +476,19 @@ EOF
   done
 }
 
-###############################################################################################################################################################################
+###################################################################################################################################################
 # Routine to import the images into PC
-###############################################################################################################################################################################
+###################################################################################################################################################
 
 function pc_cluster_img_import() {
   local _http_body
   local      _test
   local      _uuid
+  local CURL_HTTP_OPTS=" --max-time 25 --silent --header Content-Type:application/json --header Accept:application/json  --insecure "
 
-  #_cluster_uuid=$(curl ${CURL_HTTP_OPTS} --request POST 'https://localhost:9440/api/nutanix/v3/clusters/list' --user ${PRISM_ADMIN}:${PE_PASSWORD} --data '{"kind":"cluster","filter": "name==${CLUSTER_NAME}"}' | jq --arg CLUSTER_NAME "$CLUSTER_NAME" '.entities[]|select (.status.name==$CLUSTER_NAME)| .metadata.uuid' | tr -d \")
+  _cluster_uuid=$(curl ${CURL_HTTP_OPTS} -X POST 'https://localhost:9440/api/nutanix/v3/clusters/list' --user ${PRISM_ADMIN}:${PE_PASSWORD} --data '{}' | jq --arg CLUSTER_NAME "$CLUSTER_NAME" '.entities[]|select (.status.name==$CLUSTER_NAME)| .metadata.uuid' | tr -d \")
 
-  _cluster_uuid=$(curl ${CURL_HTTP_OPTS} --request POST 'https://localhost:9440/api/nutanix/v3/clusters/list' --user ${PRISM_ADMIN}:${PE_PASSWORD} --data '{}' | jq -r '.entities[] | .metadata.uuid' | tr -d \")
+  #_cluster_uuid=$(curl ${CURL_HTTP_OPTS} --request POST 'https://localhost:9440/api/nutanix/v3/clusters/list' --user ${PRISM_ADMIN}:${PE_PASSWORD} --data '{}' | jq -r '.entities[] | .metadata.uuid' | tr -d \")
 
   log "Cluster UUID is ${_cluster_uuid}"
 
@@ -501,8 +502,7 @@ _http_body=$(cat <<EOF
 EOF
   )
 
-  _test=$(curl ${CURL_HTTP_OPTS} --user ${PRISM_ADMIN}:${PE_PASSWORD} -X POST --data "${_http_body}" \
-    https://localhost:9440/api/nutanix/v3/images/migrate)
+  _test=$(curl ${CURL_HTTP_OPTS} --user ${PRISM_ADMIN}:${PE_PASSWORD} -X POST --data "${_http_body}" https://localhost:9440/api/nutanix/v3/images/migrate)
   log "Image Migration = |${_test}|"
 }
 
@@ -888,6 +888,63 @@ EOF
 function configure_era() {
   local CURL_HTTP_OPTS=" --max-time 25 --silent --header Content-Type:application/json --header Accept:application/json  --insecure "
 
+log "PE Cluster IP |${PE_HOST}|"
+log "EraServer IP |${ERA_HOST}|"
+
+##  Create the EraManaged network inside Era ##
+log "Reset Default Era Password"
+
+  _reset_passwd=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_Default_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/auth/update" --data "{ "password": "${ERA_PASSWORD}"}" | jq -r '.status' | tr -d \")
+
+log "Password Reset |${_reset_passwd}|"
+
+##  Accept EULA ##
+log "Accept Era EULA"
+
+  _accept_eula=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/auth/validate" --data '{ "eulaAccepted": true }' | jq -r '.status' | tr -d \")
+
+log "Accept EULA |${_accept_eula}|"
+
+##  Register Cluster  ##
+log "Register ${CLUSTER_NAME} with Era"
+
+HTTP_JSON_BODY=$(cat <<EOF
+{
+    "name": "EraCluster",
+    "description": "Era Bootcamp Cluster",
+    "ip": "${PE_HOST}",
+    "username": "${PRISM_ADMIN}",
+    "password": "${PE_PASSWORD}",
+    "status": "UP",
+    "version": "v2",
+    "cloudType": "NTNX",
+    "properties": [
+        {
+            "name": "ERA_STORAGE_CONTAINER",
+            "value": "${STORAGE_ERA}"
+        }
+    ]
+}
+EOF
+)
+
+  _era_cluster_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/clusters" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
+
+log "Era Cluster ID: |${_era_cluster_id}|"
+
+##  Update EraCluster ##
+log "Updating Era Cluster ID: |${_era_cluster_id}|"
+
+ClusterJSON='{"ip_address": "'${PE_HOST}'","port": "9440","protocol": "https","default_storage_container": "'${STORAGE_ERA}'","creds_bag": {"username": "'${PRISM_ADMIN}'","password": "'${PE_PASSWORD}'"}}'
+
+echo $ClusterJSON > cluster.json
+
+  _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST -H 'Content-Type: multipart/form-data' "https://${ERA_HOST}/era/v0.8/clusters/${_era_cluster_id}/json" -F file="@"cluster.json)
+
+##  Add the Secondary Network inside Era ##
+log "Create ${NW2_NAME} DHCP/IPAM Network"
+
+  _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks" --data {"name": "${NW2_NAME}","type": "DHCP"} )
 
 ##  Create the EraManaged network inside Era ##
 log "Create ${NW3_NAME} Static Network"
@@ -896,6 +953,12 @@ HTTP_JSON_BODY=$(cat <<EOF
 {
     "name": "${NW3_NAME}",
     "type": "Static",
+    "ipPools": [
+        {
+            "startIP": "${NW3_START}",
+            "endIP": "${NW3_END}"
+        }
+    ],
     "properties": [
         {
             "name": "VLAN_GATEWAY",
@@ -925,9 +988,7 @@ log "Adding IP Pool ${NW3_START} - ${NW3_END}"
 
   _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks/${network_id}/ip-pool" --data "{"ipPools": [{"startIP": "${NW3_START}","endIP": "${NW3_END}"}]}" )
 
-log "Create ${NW2_NAME} DHCP/IPAM Network"
 
-  _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks" --data {"name": "${NW2_NAME}","type": "DHCP"} )
 
 }
 
