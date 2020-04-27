@@ -882,11 +882,13 @@ EOF
 
 
 #########################################################################################################################################
-# Routine to Upload Era Bootcamp Patch images for Oracle
+# Routine to to configure Era
 #########################################################################################################################################
 
 function configure_era() {
   local CURL_HTTP_OPTS=" --max-time 25 --silent --header Content-Type:application/json --header Accept:application/json  --insecure "
+
+set -x
 
 log "PE Cluster IP |${PE_HOST}|"
 log "EraServer IP |${ERA_HOST}|"
@@ -894,7 +896,7 @@ log "EraServer IP |${ERA_HOST}|"
 ##  Create the EraManaged network inside Era ##
 log "Reset Default Era Password"
 
-  _reset_passwd=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_Default_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/auth/update" --data "{ "password": "${ERA_PASSWORD}"}" | jq -r '.status' | tr -d \")
+  _reset_passwd=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_Default_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/auth/update" --data '{ "password": "'${ERA_PASSWORD}'"}' | jq -r '.status' | tr -d \")
 
 log "Password Reset |${_reset_passwd}|"
 
@@ -939,12 +941,14 @@ ClusterJSON='{"ip_address": "'${PE_HOST}'","port": "9440","protocol": "https","d
 
 echo $ClusterJSON > cluster.json
 
-  _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST -H 'Content-Type: multipart/form-data' "https://${ERA_HOST}/era/v0.8/clusters/${_era_cluster_id}/json" -F file="@"cluster.json)
+  _task_id=$(curl -k -H 'Content-Type: multipart/form-data' -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/clusters/${_era_cluster_id}/json" -F file="@"cluster.json)
 
 ##  Add the Secondary Network inside Era ##
 log "Create ${NW2_NAME} DHCP/IPAM Network"
 
-  _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks" --data {"name": "${NW2_NAME}","type": "DHCP"} )
+  _dhcp_network_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks" --data '{"name": "'${NW2_NAME}'","type": "DHCP"}' | jq -r '.id' | tr -d \")
+
+log "Created ${NW2_NAME} Network with Network ID |${_dhcp_network_id}|"
 
 ##  Create the EraManaged network inside Era ##
 log "Create ${NW3_NAME} Static Network"
@@ -970,25 +974,291 @@ HTTP_JSON_BODY=$(cat <<EOF
         },
         {
             "name": "VLAN_SUBNET_MASK",
-            "value": "${NW2_SUBNET}"
-        }
+            "value": "${NW3_NETMASK}"
+        },
+        {
+    		"name": "VLAN_DNS_DOMAIN",
+    		"value": "ntnxlab.local"
+    	  }
     ]
 }
 EOF
 )
 
-  _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks" --data "${HTTP_JSON_BODY}" )
+  _static_network_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
 
-log "Get ${NW3_NAME} Network ID"
+log "Created ${NW3_NAME} Network with Network ID |${_static_network_id}|"
 
-  network_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X GET "https://${ERA_HOST}/era/v0.8/resources/networks" | jq -r '.[].id' | tr -d \")
+##  Create the Primary-MSSQL-NETWORK Network Profile inside Era ##
+log "Create the Primary-MSSQL-NETWORK Network Profile"
 
-log "Get ${NW3_NAME} Network ID is ${network_id}"
-log "Adding IP Pool ${NW3_START} - ${NW3_END}"
+HTTP_JSON_BODY=$(cat <<EOF
+{
+  "engineType": "sqlserver_database",
+  "type": "Network",
+  "topology": "ALL",
+  "dbVersion": "ALL",
+  "systemProfile": false,
+  "properties": [
+    {
+      "name": "VLAN_NAME",
+      "value": "Secondary",
+      "description": "Name of the vLAN"
+    }
+  ],
+  "name": "Primary-MSSQL-NETWORK"
+}
+EOF
+)
 
-  _task_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/resources/networks/${network_id}/ip-pool" --data "{"ipPools": [{"startIP": "${NW3_START}","endIP": "${NW3_END}"}]}" )
+  _primary_network_profile_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/profiles" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
 
+log "Created Primary-MSSQL-NETWORK Network Profile with ID |${_primary_network_profile_id}|"
 
+##  Create the Primary_ORACLE_NETWORKNetwork Profile inside Era ##
+log "Create the Primary_ORACLE_NETWORK Network Profile"
+
+HTTP_JSON_BODY=$(cat <<EOF
+{
+  "engineType": "oracle_database",
+  "type": "Network",
+  "topology": "single",
+  "dbVersion": "ALL",
+  "systemProfile": false,
+  "properties": [
+    {
+      "name": "VLAN_NAME",
+      "value": "Secondary",
+      "description": "Name of the vLAN"
+    }
+  ],
+  "name": "Primary_ORACLE_NETWORK"
+}
+EOF
+)
+
+  _oracle_network_profile_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/profiles" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
+
+log "Created Primary_ORACLE_NETWORK Network Profile with ID |${_oracle_network_profile_id}|"
+
+##  Create the ERAMANAGED_MSSQL_NETWORK Network Profile inside Era ##
+log "Create the ERAMANAGED_MSSQL_NETWORK Network Profile"
+
+HTTP_JSON_BODY=$(cat <<EOF
+{
+  "engineType": "sqlserver_database",
+  "type": "Network",
+  "topology": "ALL",
+  "dbVersion": "ALL",
+  "systemProfile": false,
+  "properties": [
+    {
+      "name": "VLAN_NAME",
+      "value": "${NW3_NAME}",
+      "description": "Name of the vLAN"
+    }
+  ],
+  "name": "ERAMANAGED_MSSQL_NETWORK"
+}
+EOF
+)
+
+  _eramanagaed_network_profile_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/profiles" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
+
+log "Created ERAMANAGED_MSSQL_NETWORK Network Profile with ID |${_eramanagaed_network_profile_id}|"
+
+##  Create the CUSTOM_EXTRA_SMALL Compute Profile inside Era ##
+log "Create the CUSTOM_EXTRA_SMALL Compute Profile"
+
+HTTP_JSON_BODY=$(cat <<EOF
+{
+  "type": "Compute",
+  "topology": "ALL",
+  "dbVersion": "ALL",
+  "systemProfile": false,
+  "properties": [
+    {
+      "name": "CPUS",
+      "value": "1",
+      "description": "Number of CPUs in the VM"
+    },
+    {
+      "name": "CORE_PER_CPU",
+      "value": "2",
+      "description": "Number of cores per CPU in the VM"
+    },
+    {
+      "name": "MEMORY_SIZE",
+      "value": 4,
+      "description": "Total memory (GiB) for the VM"
+    }
+  ],
+  "name": "CUSTOM_EXTRA_SMALL"
+}
+EOF
+)
+
+  _xs_compute_profile_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/profiles" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
+
+log "Created CUSTOM_EXTRA_SMALL Compute Profile with ID |${_xs_compute_profile_id}|"
+
+##  Create the ORACLE_SMALL Compute Profile inside Era ##
+log "Create the ORACLE_SMALL Compute Profile"
+
+HTTP_JSON_BODY=$(cat <<EOF
+{
+  "type": "Compute",
+  "topology": "ALL",
+  "dbVersion": "ALL",
+  "systemProfile": false,
+  "properties": [
+    {
+      "name": "CPUS",
+      "value": "1",
+      "description": "Number of CPUs in the VM"
+    },
+    {
+      "name": "CORE_PER_CPU",
+      "value": 4,
+      "description": "Number of cores per CPU in the VM"
+    },
+    {
+      "name": "MEMORY_SIZE",
+      "value": 8,
+      "description": "Total memory (GiB) for the VM"
+    }
+  ],
+  "name": "ORACLE_SMALL"
+}
+EOF
+)
+
+  _oracle_small_compute_profile_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/profiles" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
+
+log "Created ORACLE_SMALL Compute Profile with ID |${_oracle_small_compute_profile_id}|"
+
+##  Create the NTNXLAB Domain Profile inside Era ##
+log "Create the NTNXLAB Domain Profile"
+
+HTTP_JSON_BODY=$(cat <<EOF
+{
+  "type": "WindowsDomain",
+  "topology": "ALL",
+  "dbVersion": "ALL",
+  "systemProfile": false,
+  "properties": [
+    {
+      "name": "DOMAIN_NAME",
+      "value": "ntnxlab.local",
+      "description": "Name of the Windows domain"
+    },
+    {
+      "name": "DOMAIN_USER_NAME",
+      "value": "ntnxlab.local\\Administrator",
+      "description": "Username with permission to join computer to domain"
+    },
+    {
+      "name": "DOMAIN_USER_PASSWORD",
+      "value": "nutanix/4u",
+      "description": "Password for the username with permission to join computer to domain"
+    },
+    {
+      "name": "DB_SERVER_OU_PATH",
+      "value": "",
+      "description": "Custom OU path for database servers"
+    },
+    {
+      "name": "CLUSTER_OU_PATH",
+      "value": "",
+      "description": "Custom OU path for server clusters"
+    },
+    {
+      "name": "ADD_PERMISSION_ON_OU",
+      "value": "",
+      "description": "Grant server clusters permission on OU"
+    }
+  ],
+  "name": "NTNXLAB"
+}
+EOF
+)
+
+  _ntnxlab_domain_profile_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/profiles" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
+
+log "Created NTNXLAB Domain Profile with ID |${_ntnxlab_domain_profile_id}|"
+
+##  Create the ORACLE_SMALL_PARAMS Parameters Profile inside Era ##
+log "Create the ORACLE_SMALL_PARAMS Parameters Profile"
+
+HTTP_JSON_BODY=$(cat <<EOF
+{
+  "engineType": "oracle_database",
+  "type": "Database_Parameter",
+  "topology": "ALL",
+  "dbVersion": "ALL",
+  "systemProfile": false,
+  "properties": [
+    {
+      "name": "MEMORY_TARGET",
+      "value": 4096,
+      "description": "Total Memory (MiB): Total memory (AKA MEMORY_TARGET) specifies the Oracle systemwide usable memory. The database tunes memory to the total memory value, reducing or enlarging the SGA and PGA as needed."
+    },
+    {
+      "name": "SGA_TARGET",
+      "value": "",
+      "description": "SGA (MiB): Provide a value here to disable automatic shared memory management. Providing a value enables you to determine how the SGA memory is distributed among the SGA memory components."
+    },
+    {
+      "name": "PGA_AGGREGATE_TARGET",
+      "value": "",
+      "description": "PGA (MiB): Provide a value here to disable automatic shared memory management. Providing a value enables you to determine how the PGA memory is distributed among the PGA memory components."
+    },
+    {
+      "name": "SHARED_SERVERS",
+      "value": "0",
+      "description": "Number of shared servers: Specify this number when the connection mode is set to 'shared'"
+    },
+    {
+      "name": "DB_BLOCK_SIZE",
+      "value": "8",
+      "description": "Block Size (KiB): Oracle Database data is stored in data blocks of the size specified. One data block corresponds to a specific number of bytes of physical space on the disk. Selecting a block size other than the default 8 kilobytes (KiB) value requires advanced knowledge and should be done only when absolutely required."
+    },
+    {
+      "name": "PROCESSES",
+      "value": "300",
+      "description": "Number of processes: Specify the maximum number of processes that can simultaneously connect to the database. Enter a number or accept the default value of 300. The default value for this parameter is appropriate for many environments. The value you select should allow for all background processes, user processes, and parallel execution processes."
+    },
+    {
+      "name": "TEMP_TABLESPACE",
+      "value": "256",
+      "description": "Temp Tablespace (MiB)"
+    },
+    {
+      "name": "UNDO_TABLESPACE",
+      "value": 256,
+      "description": "Undo Tablespace (MiB)"
+    },
+    {
+      "name": "NLS_LANGUAGE",
+      "value": "AMERICAN",
+      "description": "Default Language: The default language determines how the database supports locale-sensitive information such as day and month abbreviations, default sorting sequence for character data, and reading direction (left to right ir right to left)."
+    },
+    {
+      "name": "NLS_TERRITORY",
+      "value": "AMERICA",
+      "description": "Default Territory: Select the name of the territory whose conventions are to be followed for day and week numbering or accept the default. The default territory also establishes the default date format, the default decimal character and group separator, and the default International Standardization Organization (ISO) and local currency symbols."
+    }
+  ],
+  "name": "ORACLE_SMALL_PARAMS"
+}
+EOF
+)
+
+  _oracle_param_profile_id=$(curl ${CURL_HTTP_OPTS} -u ${ERA_USER}:${ERA_PASSWORD} -X POST "https://${ERA_HOST}/era/v0.8/profiles" --data "${HTTP_JSON_BODY}" | jq -r '.id' | tr -d \")
+
+log "Created ORACLE_SMALL_PARAMS Parameters Profile with ID |${_oracle_param_profile_id}|"
+
+set +x
 
 }
 
